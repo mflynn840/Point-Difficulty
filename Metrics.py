@@ -37,6 +37,11 @@ class RunningVOG:
         self.mean = torch.zeros(shape)
         self.m2 = torch.zeros(shape)
     
+    '''
+    
+        data is of the form (num samples, gradient dimension)
+    
+    '''
     def update(self, data):
         self.n += 1
         delta = data-self.mean
@@ -70,14 +75,19 @@ class RunningVOG:
 class SliceLoss:
     
     def __init__(self):
+        x=1
         
             
 class EL2N:
+    x=1
 
 class GRAND:
+    x=1
 
 class EL2N:
+    x=1
 
 class PCA1:
+    x=1
     
 

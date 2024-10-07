@@ -34,6 +34,8 @@ class AdultDataset(Dataset):
     def parseData(self, f_name):
         with open(f_name, 'rb') as file:
             return pkl.load(file)
+        
+        
 
 def get_slice_ga_errors2(model, X, Y, slice_idxs):
         device = "cuda:0"
@@ -68,27 +70,46 @@ def get_slice_ga_errors2(model, X, Y, slice_idxs):
     
 class SimpleNN(nn.Module):
     
-    def __init__(self, inFeatures, hiddenNeurons, hiddenLayers, classesOut):
+    def __init__(self, in_features, n_hidden, layer_size, n_classes):
         super(SimpleNN, self).__init__()
-        self.hiddenLayers = []
-        self.input = nn.Linear(inFeatures, hiddenNeurons)
         
-        for i in range(hiddenLayers):
-            self.hiddenLayers.append(nn.Linear(hiddenNeurons, hiddenNeurons)) 
-             
-        self.hidden2 = nn.Linear(hiddenNeurons, hiddenNeurons)
-        self.output = nn.Linear(hiddenNeurons,classesOut)
-        self.flatten = nn.Flatten()
+        layers = []
+        
+        #input layer
+        layers.append(nn.Linear(in_features, layer_size))
+
+        #hiden layers
+        for i in range(n_hidden-1):
+            layers.append(nn.Linear(layer_size, layer_size)) 
+            layers.append(nn.LeakyReLU(0.01))
+
+        #output layer
+        layers.append(nn.Linear(layer_size, n_classes))
+        
+        self.model = nn.Sequential(*layers)
         self.apply(init_weights)
         
 
         
     def forward(self, x):
-        x = self.flatten(x)
-        x = torch.relu(self.input(x))
-        for i in range(len(self.hiddenLayers)):
-            x = self.hiddenLayers[i](x)
-            x = F.leaky_relu(x)
+        return self.model(x)
+            
+
+class AdultDataset(Dataset):
+    def __init__(self, path):
+        self.X, self.Y = self.parseData(path)
+        self.Y = torch.tensor(self.Y, dtype=torch.long)
+
+        
+    def __len__(self):
+        return self.X.shape[0]
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.Y[idx]
+
+    def parseData(self, f_name):
+        with open(f_name, 'rb') as file:
+            return pkl.load(file)
             
             
     
