@@ -164,6 +164,7 @@ cython_debug/
 Data/
 wandb/
 __pycache__
+lightning_logs/
 
 
 
