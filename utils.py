@@ -73,6 +73,7 @@ class SimpleNN(nn.Module):
     def __init__(self, in_features, n_hidden, layer_size, n_classes):
         super(SimpleNN, self).__init__()
         
+        self.n_layers = n_hidden + 2
         layers = []
         
         #input layer

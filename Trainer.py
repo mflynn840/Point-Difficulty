@@ -52,48 +52,6 @@ class PointDifficultyModule(pl.LightningModule):
     '''get gradients vog needs to compute VOG for each datapoint'''
     def get_VOG_grads(self):
         self.model.zero_grad()
-        X = self.trainSet.X.to(self.device)
-        Y = self.trainSet.Y.to(self.device)
-        X.requires_grad_(True)
-        logits = self.model(X)
-        logits = logits[:, Y]
-        logits.backward(torch.ones_like(logits))
-        input_grad = X.grad
-        S = input_grad.detach().cpu()
-        return S
-    
-    '''get gradient of models output w.r.t weights'''
-    def get_logit_weight_grad(self):
-        self.model.zero_grad()
-        X = self.trainset.X.to(self.device)
-        Y = self.trainset.Y.to(self.device)
-        
-        logits = self.model(X)
-        logits = logits[:, Y]
-        
-        for logit in logits:
-            logit.backward(retain_graph=True)
-            
-        weight_grads =  {name: param.grad.clone() for name, param in self.model.named_parameters() if param.grad is not None}
-        
-        self.model.zero_grad()
-        return weight_grads
-    
-    def get_loss_output_grad(self):
-        self.model.zero_grad()
-        X = self.trainset.X.to(self.device)
-        Y = self.trainset.Y.to(self.device)
-        
-        logits = self.model(X)
-        loss = self.criterion(logits, Y)
-        loss.backward()
-        output_grads = logits.grad.detach().cpu() if logits.grad is not None else None
-        self.model.zero_grad()
-        
-        return output_grads
-    
-    def get_VOG_grads(self):
-        self.model.zero_grad()
         X = self.trainset.X.to(self.device)
         Y = self.trainset.Y.to(self.device)
         X.requires_grad_(True)
@@ -103,24 +61,43 @@ class PointDifficultyModule(pl.LightningModule):
         input_grad = X.grad
         S = input_grad.detach().cpu()
         return S
-    
-    
+
     def get_EL2N(self):
         X = self.trainset.X.to(self.device)
         Y = self.trainset.Y.to(self.device)
         logits = self.model(X)
-        probabilities = F.softmax(logits, dim=1)
-        Y_one_hot = F.one_hot(Y, num_classes=logits.size(1)).float()
-        
-        score = torch.norm(probabilities - Y_one_hot, p=2)
+        probabilities = torch.nn.functional.softmax(logits, dim=1)
+        Y_one_hot = torch.nn.functional.one_hot(Y, num_classes=logits.size(1)).float()
+        score = torch.norm(probabilities - Y_one_hot, p=2, dim=1)
+        print(score.shape)
         return score
     
     def get_GRAND(self):
-        logit_weight_grad = self.get_logit_weight_grad()
-        loss_output_grad = self.get_loss_output_grad()
+        self.model.zero_grad()
+        X = self.trainset.X.to(self.device)
+        Y = self.trainset.Y.to(self.device)
         
-        return torch.norm(torch.sum(loss_output_grad.T * logit_weight_grad, dim=0))
+        no_reduction_loss = nn.CrossEntropyLoss(reduction='none')
         
+        output_layer = self.model.model[-1]
+        
+        for name, param in self.model.named_parameters():
+            if not (str(self.model.n_layers-1) in name and "weight" in name):
+                param.requires_grad = False
+                
+        
+        logits = self.model(X)
+        loss = no_reduction_loss(logits, Y)
+        
+        scores = torch.zeros((X.shape[0]))
+        
+        for i in range(X.shape[0]):
+            loss[i].backward(retain_graph=True)
+            cur_grad = output_layer.weight.grad.detach()
+            cur_grad = torch.sum(cur_grad, dim=0)
+            scores[i] = torch.norm(cur_grad, p=2)
+            self.model.zero_grad()
+        return scores
     
     def get_loss(self):
         X = self.trainset.X.to(self.device)
@@ -128,19 +105,15 @@ class PointDifficultyModule(pl.LightningModule):
         logits = self.model(X)
         criterion = nn.CrossEntropyLoss(reduction='none')
         return criterion(logits, Y)
-    
 
     def on_train_epoch_end(self):
-                
-
-        print(self.current_epoch)
         if self.current_epoch == 0:
             self.VOG = RunningVOG((len(self.trainset.X), 128))
-            
         
         self.VOG.update(self.get_VOG_grads())
         
-        if self.current_epoch % self.eval_freq == 0:
+        
+        if self.current_epoch % self.eval_freq == 0 and self.current_epoch > 0:
             metrics = {
                 "GRAND" : self.get_GRAND(),
                 "EL2N" : self.get_EL2N(),
@@ -149,7 +122,7 @@ class PointDifficultyModule(pl.LightningModule):
                 "VOG" : self.VOG.get_VOGs()
             }
             
-            self.val_metrics[self.current_epoch] = metrics
+            self.train_metrics[self.current_epoch] = metrics
         
 
     def configure_optimizers(self):
