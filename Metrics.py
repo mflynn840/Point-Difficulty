@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 import torch
-
+import numpy as np
 
 class PointDifficultyMetric(ABC):
     
@@ -56,10 +56,33 @@ class RunningVOG:
         if self.n >1:
             return self.m2 / (self.n-1)
     
-    def get_VOGs(self):
+    def get_VOGs(self, labels):
         varience = self.get_varience()
         VOG = (1/self.shape[1]) * torch.sum(varience, 1)
-        return VOG
+        
+        #vog[i] is score for point i, labels[i] is the class point i belongs to
+        class_means = []
+        class_sds = []
+        
+        labs = np.unique(labels)
+        for cls in np.unique(labs):
+            class_scores = VOG[labels==cls]
+            class_means.append(torch.mean(class_scores))
+            class_sds.append(torch.std(class_scores))
+
+        class_means = torch.tensor(class_means)
+        class_sds = torch.tensor(class_sds)
+        
+        normalized_VOG = torch.empty_like(VOG)
+        for i in range(len(VOG)):
+            cls_index = labs.tolist().index(labels[i].item())  # Get index of the class
+            mean = class_means[cls_index]
+            sd = class_sds[cls_index]
+            
+            # Normalize using (VOG - mean) / std
+            normalized_VOG[i] = (VOG[i] - mean) / sd if sd > 0 else 0  # Avoid division by zero
+
+        return normalized_VOG
     
     def get_slice_VOGs(self, slice_idxs):
         all_vogs = self.get_VOGs()

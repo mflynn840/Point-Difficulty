@@ -5,7 +5,11 @@ from torch import nn
 from torch.utils.data import Dataset
 import pickle as pkl
 import torch.functional as F
-
+from pytorch_lightning.callbacks import ModelCheckpoint
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 def init_weights(layer):
     if isinstance(layer, nn.Linear):
@@ -39,11 +43,7 @@ class AdultDataset(Dataset):
 
 def get_slice_ga_errors2(model, X, Y, slice_idxs):
         device = "cuda:0"
-        
-
         model.eval()
-        model.zero_grad()
-        
         model.zero_grad()
         X = X.to(device)
         Y = Y.to(device, non_blocking=True)
@@ -78,6 +78,7 @@ class SimpleNN(nn.Module):
         
         #input layer
         layers.append(nn.Linear(in_features, layer_size))
+        layers.append(nn.LeakyReLU(.01))
 
         #hiden layers
         for i in range(n_hidden-1):
@@ -111,6 +112,67 @@ class AdultDataset(Dataset):
     def parseData(self, f_name):
         with open(f_name, 'rb') as file:
             return pkl.load(file)
+        
+class CustomModelCheckpoint(ModelCheckpoint):
+    def __init__(self, metrics_dict, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.metrics_dict = metrics_dict
+
+    def on_save_checkpoint(self, trainer, pl_module, checkpoint):
+        # Call the parent method to save the model
+        super().on_save_checkpoint(trainer, pl_module, checkpoint)
+
+        # Prepare the file path for metrics
+        metrics_path = os.path.join(self.dirpath, f"{self.filename}.metrics")
+
+        # Save the metrics dictionary as a JSON file
+        with open(metrics_path, 'wb') as f:
+            pkl.dump(self.metrics_dict, f)
             
             
+class QuickPlot:
+    def __init__(self, Xs, Ys, labels, xlab="x", ylab="y", title="Title", markLast=False, percent=False):
+
+        if type(Xs) is list:
+            for X, Y, label in zip(Xs, Ys, labels):
+                plt.plot(X, Y, label=label, linestyle='-')
+                
+                if markLast:
+                    if percent:
+                        plt.text( X[-1],Y[-1], f'Final = {Y[-1]*100:.2f} %', fontsize=14, ha='right', va='bottom')
+                    else:
+                        plt.text( X[-1],Y[-1], f'Final = {Y[-1]:.3f} ', fontsize=14, ha='right', va='bottom')
+        else:
+            plt.plot(X, Y)
+
+        plt.xlabel(xlab)
+        plt.ylabel(ylab)
+        plt.title(title)
+
+
+        # Add a legend, grid, and show the plot
+        plt.legend(markerscale=1.5)
+        plt.grid(True)
+        plt.show()
+       
+def correlation_matrix(scores, score_names, epoch):
+    # Create a DataFrame from the scores array
+    df = pd.DataFrame(scores, columns=score_names)
+
+    # Calculate the correlation matrix between scoring functions
+    correlation_matrix = df.corr()
+
+    # Display the correlation matrix
+    print("Correlation Matrix:\n", correlation_matrix)
+
+    # Optional: Visualize the correlation matrix using seaborn
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt=".2f")
+    plt.title('Correlation Matrix of Scoring Functions epoch' + str(epoch))
+    plt.show()
     
+def get_slice_idx_list(path="./slice.idx"):
+    with open(path, 'rb') as file:
+        return pkl.load(file)
+        
+

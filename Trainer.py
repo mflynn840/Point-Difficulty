@@ -10,16 +10,17 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from math import sqrt
 import torch.functional as F 
-from utils import SimpleNN, AdultDataset
+from utils import SimpleNN, AdultDataset, CustomModelCheckpoint, get_slice_idx_list
 from Metrics import RunningVOG
 from sklearn.preprocessing import OneHotEncoder
-
+import random
+from sklearn.metrics import roc_auc_score
 #if you have tensor cores
 torch.set_float32_matmul_precision('medium')
 
 
 class PointDifficultyModule(pl.LightningModule):
-    def __init__(self, lr, model, total_steps, trainset, eval_freq = 1):
+    def __init__(self, lr, model, total_steps, trainset, metrics, eval_freq = 3):
         super(PointDifficultyModule, self).__init__()
 
         self.eval_freq = eval_freq
@@ -29,7 +30,7 @@ class PointDifficultyModule(pl.LightningModule):
         self.learning_rate = lr
         self.seen_examples = 0
         self.model = model
-        self.train_metrics = {}
+        self.train_metrics = metrics
         self.train_VOG = None
         self.collected_on_epoch = []
         self.criterion = nn.CrossEntropyLoss()
@@ -42,7 +43,7 @@ class PointDifficultyModule(pl.LightningModule):
         x,y = batch
         logits = self(x)
         loss = self.criterion(logits , y)
-        self.log("train_loss", loss, on_step=True)
+        self.log("train_loss", loss, on_step=True, prog_bar=True)
         self.log("lr", self.optimizers().param_groups[0]['lr'], on_step=True)
         self.seen_examples += x.size(0)
         self.log("seen examples", self.seen_examples, on_step=True)
@@ -69,8 +70,7 @@ class PointDifficultyModule(pl.LightningModule):
         probabilities = torch.nn.functional.softmax(logits, dim=1)
         Y_one_hot = torch.nn.functional.one_hot(Y, num_classes=logits.size(1)).float()
         score = torch.norm(probabilities - Y_one_hot, p=2, dim=1)
-        print(score.shape)
-        return score
+        return score.cpu()
     
     def get_GRAND(self):
         self.model.zero_grad()
@@ -94,17 +94,42 @@ class PointDifficultyModule(pl.LightningModule):
         for i in range(X.shape[0]):
             loss[i].backward(retain_graph=True)
             cur_grad = output_layer.weight.grad.detach()
-            cur_grad = torch.sum(cur_grad, dim=0)
-            scores[i] = torch.norm(cur_grad, p=2)
+            scores[i] = torch.norm(cur_grad[Y[i]], p=2)
             self.model.zero_grad()
-        return scores
+            
+        for name, param in self.model.named_parameters():
+            param.requires_grad = True
+                
+            
+        return scores.cpu()
     
     def get_loss(self):
         X = self.trainset.X.to(self.device)
         Y = self.trainset.Y.to(self.device)
         logits = self.model(X)
         criterion = nn.CrossEntropyLoss(reduction='none')
-        return criterion(logits, Y)
+        return criterion(logits, Y).detach().cpu()
+    
+    def slice_auc_roc(self):
+        y_true = self.trainset.Y.numpy()
+        y_pred = self.model(self.trainset.X)[:,1].numpy()
+        
+        slice_idxs = get_slice_idx_list()
+        
+        scores = torch.zeros((len(slice_idx)))
+        
+        for i, slice_idx in enumerate(slice_idxs):
+            scores[i] = roc_auc_score(y_true[slice_idx], y_pred[slice_idx])
+            
+        return scores
+    
+    def convert_to_slice_score(point_scores):
+        slice_idxs = get_slice_idx_list()
+        scores = torch.zeros((len(slice_idxs)))
+        
+        for i, slice_idx in enumerate(slice_idxs):
+            scores[i] = torch.mean(point_scores[slice_idx])
+        return scores
 
     def on_train_epoch_end(self):
         if self.current_epoch == 0:
@@ -115,15 +140,17 @@ class PointDifficultyModule(pl.LightningModule):
         
         if self.current_epoch % self.eval_freq == 0 and self.current_epoch > 0:
             metrics = {
-                "GRAND" : self.get_GRAND(),
-                "EL2N" : self.get_EL2N(),
+                "GRAND" : self.convert_to_slice_score(self.get_GRAND()),
+                "EL2N" : self.convert_to_slice_score(self.get_EL2N()),
                 "PCA1" : None,
-                "loss" : self.get_loss(),
-                "VOG" : self.VOG.get_VOGs()
+                "loss" : self.convert_to_slice_score(self.get_loss()),
+                "VOG" : self.convert_to_slice_score(self.VOG.get_VOGs(self.trainset.Y)),
+                "AUC-ROC" : self.slice_auc_roc()
             }
             
             self.train_metrics[self.current_epoch] = metrics
         
+
 
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
@@ -136,10 +163,7 @@ class PointDifficultyModule(pl.LightningModule):
         self.scheduler = scheduler
         return optimizer
 
-        
-    def val_dataloader(self, bs=32):
-        return DataLoader(self.val_dataset, batch_size=bs)
-        
+
 
 def train_model(run_name, model, batch_size, epochs, learning_rate):
 
@@ -152,13 +176,15 @@ def train_model(run_name, model, batch_size, epochs, learning_rate):
     test_set.X = torch.tensor(encoder.transform(test_set.X), dtype=torch.float32)
     
     loader_args = dict(batch_size=batch_size, num_workers=16, persistent_workers=True, pin_memory=True)
-    train_loader = DataLoader(train_set, shuffle=True, **loader_args, drop_last=True)
+    train_loader = DataLoader(train_set, shuffle=False, **loader_args, drop_last=False)
     test_loader = DataLoader(test_set, shuffle=False, **loader_args)
 
+    metrics = {}
     #checkpoint model based on lowest val_loss
-    checkpoint_callback = ModelCheckpoint(
+    checkpoint_callback = CustomModelCheckpoint(
+        metrics_dict=metrics,
         monitor='epoch',  
-        dirpath='./problem_1/checkpoints/',  
+        dirpath='./checkpoints/',  
         filename=run_name, 
         save_top_k=1,    
         mode='max'           
@@ -166,9 +192,9 @@ def train_model(run_name, model, batch_size, epochs, learning_rate):
 
     total_training_steps = len(train_loader) * epochs
     trainer = pl.Trainer( max_epochs=epochs, callbacks = [checkpoint_callback], log_every_n_steps=1)
-    module = PointDifficultyModule(learning_rate, model, total_training_steps, train_set)
+    module = PointDifficultyModule(learning_rate, model, total_training_steps, train_set, metrics)
     trainer.fit(module, train_loader)
-    trainer.test(module, test_loader)
+    #trainer.test(module, test_loader)
 
 
         
@@ -183,7 +209,7 @@ def get_args():
     parser.add_argument('--save_dir', type=str, default='./checkpoints/',
                         help='save best checkpoint to this dir')
     # training config
-    parser.add_argument('--epochs', type=int, default=10, help='training epochs')
+    parser.add_argument('--epochs', type=int, default=20, help='training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='batch size; modify this to fit your GPU memory')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
 
@@ -193,34 +219,26 @@ def get_args():
 
 
 def start():
-    #wandb.init()
-    set_seed(42)
-    args = get_args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    for i in range(100):
+        #wandb.init()
+        seed  = random.randint(0,999999999)
+        set_seed(seed)
+        args = get_args()
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    model = SimpleNN(128, 2, 100, 2)
-    train_model(
-        run_name=args.run_name,
-        model=model,
-        batch_size=args.batch_size,
-        epochs=args.epochs,
-        learning_rate= 0.001,
-    )
+        model = SimpleNN(128, 2, 100, 2)
+        train_model(
+            run_name=str(seed),
+            model=model,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            learning_rate= 0.001,
+        )
 
 if __name__ == '__main__':
-    sweep_configuration = {
-        'name' : "lr_sweep",
-        "method" : "grid",
-        "parameters" : {
-            'lr' : {
-                'values' : [1e-3]
-            }
-        }
-    }
-    
     start()
     
-    #sweep_id = wandb.sweep(sweep=None, project="Honor Thesis")
-    #wandb.agent(sweep_id, function=start)
+
     
     
