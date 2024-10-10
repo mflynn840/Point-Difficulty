@@ -166,5 +166,5 @@ wandb/
 __pycache__
 lightning_logs/
 problem_1/
-
+checkpoints/
 
