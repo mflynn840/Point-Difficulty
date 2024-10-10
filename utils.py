@@ -81,7 +81,7 @@ class SimpleNN(nn.Module):
         layers.append(nn.LeakyReLU(.01))
 
         #hiden layers
-        for i in range(n_hidden-1):
+        for i in range(n_hidden+1):
             layers.append(nn.Linear(layer_size, layer_size)) 
             layers.append(nn.LeakyReLU(0.01))
 

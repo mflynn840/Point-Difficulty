@@ -14,13 +14,13 @@ from utils import SimpleNN, AdultDataset, CustomModelCheckpoint, get_slice_idx_l
 from Metrics import RunningVOG
 from sklearn.preprocessing import OneHotEncoder
 import random
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, accuracy_score
 #if you have tensor cores
 torch.set_float32_matmul_precision('medium')
 
-
+import numpy as np
 class PointDifficultyModule(pl.LightningModule):
-    def __init__(self, lr, model, total_steps, trainset, metrics, eval_freq = 3):
+    def __init__(self, lr, model, total_steps, trainset, metrics, eval_freq = 1):
         super(PointDifficultyModule, self).__init__()
 
         self.eval_freq = eval_freq
@@ -70,7 +70,7 @@ class PointDifficultyModule(pl.LightningModule):
         probabilities = torch.nn.functional.softmax(logits, dim=1)
         Y_one_hot = torch.nn.functional.one_hot(Y, num_classes=logits.size(1)).float()
         score = torch.norm(probabilities - Y_one_hot, p=2, dim=1)
-        return score.cpu()
+        return score.detach().cpu()
     
     def get_GRAND(self):
         self.model.zero_grad()
@@ -80,10 +80,15 @@ class PointDifficultyModule(pl.LightningModule):
         no_reduction_loss = nn.CrossEntropyLoss(reduction='none')
         
         output_layer = self.model.model[-1]
+        output_layer_name = list(self.model.named_modules())[-1][0]
+        
         
         for name, param in self.model.named_parameters():
-            if not (str(self.model.n_layers-1) in name and "weight" in name):
+            if output_layer_name in name and "weight" in name:
+                param.requires_grad = True
+            else:
                 param.requires_grad = False
+                
                 
         
         logits = self.model(X)
@@ -112,18 +117,32 @@ class PointDifficultyModule(pl.LightningModule):
     
     def slice_auc_roc(self):
         y_true = self.trainset.Y.numpy()
-        y_pred = self.model(self.trainset.X)[:,1].numpy()
+        y_pred = torch.softmax(self.model(self.trainset.X.to(self.device)), dim=1)[:,1].detach().cpu().numpy()
         
         slice_idxs = get_slice_idx_list()
         
-        scores = torch.zeros((len(slice_idx)))
+        scores = torch.zeros((len(slice_idxs)))
         
         for i, slice_idx in enumerate(slice_idxs):
-            scores[i] = roc_auc_score(y_true[slice_idx], y_pred[slice_idx])
-            
+            if len(np.unique(y_true[slice_idx])) > 1:
+                scores[i] = roc_auc_score(y_true[slice_idx], y_pred[slice_idx])
+            else:
+                print("could not AUC compute for slice " + str(i) + "because it only has 1 class in it")
         return scores
     
-    def convert_to_slice_score(point_scores):
+    def slice_accuracy(self):
+        y_true = self.trainset.Y.numpy()
+        y_pred = torch.argmax(self.model(self.trainset.X.to(self.device)), dim=1).detach().cpu().numpy()
+        
+        
+        slice_idxs = get_slice_idx_list()
+        scores = torch.zeros((len(slice_idxs)))
+        for i, slice_idx in enumerate(slice_idxs):
+            scores[i] = accuracy_score(y_true[slice_idx], y_pred[slice_idx])
+    
+        return scores
+    
+    def convert_to_slice_score(self, point_scores):
         slice_idxs = get_slice_idx_list()
         scores = torch.zeros((len(slice_idxs)))
         
@@ -145,7 +164,19 @@ class PointDifficultyModule(pl.LightningModule):
                 "PCA1" : None,
                 "loss" : self.convert_to_slice_score(self.get_loss()),
                 "VOG" : self.convert_to_slice_score(self.VOG.get_VOGs(self.trainset.Y)),
-                "AUC-ROC" : self.slice_auc_roc()
+                "AUC-ROC" : self.slice_auc_roc(),
+                "accuracy" : self.slice_accuracy()
+            }
+            self.train_metrics[self.current_epoch] = metrics
+        elif self.current_epoch % self.eval_freq == 0:
+            metrics = {
+                "GRAND" : self.convert_to_slice_score(self.get_GRAND()),
+                "EL2N" : self.convert_to_slice_score(self.get_EL2N()),
+                "PCA1" : None,
+                "loss" : self.convert_to_slice_score(self.get_loss()),
+                "VOG" : None,
+                "AUC-ROC" : self.slice_auc_roc(),
+                "accuracy" : self.slice_accuracy()
             }
             
             self.train_metrics[self.current_epoch] = metrics
@@ -165,7 +196,7 @@ class PointDifficultyModule(pl.LightningModule):
 
 
 
-def train_model(run_name, model, batch_size, epochs, learning_rate):
+def train_model(run_name, model, batch_size, epochs, learning_rate, eval_freq=1):
 
     train_set = AdultDataset("./Data/Adult/train.pkl")
     test_set = AdultDataset("./Data/Adult/test.pkl")
@@ -192,7 +223,7 @@ def train_model(run_name, model, batch_size, epochs, learning_rate):
 
     total_training_steps = len(train_loader) * epochs
     trainer = pl.Trainer( max_epochs=epochs, callbacks = [checkpoint_callback], log_every_n_steps=1)
-    module = PointDifficultyModule(learning_rate, model, total_training_steps, train_set, metrics)
+    module = PointDifficultyModule(learning_rate, model, total_training_steps, train_set, metrics, eval_freq=eval_freq)
     trainer.fit(module, train_loader)
     #trainer.test(module, test_loader)
 
@@ -209,7 +240,7 @@ def get_args():
     parser.add_argument('--save_dir', type=str, default='./checkpoints/',
                         help='save best checkpoint to this dir')
     # training config
-    parser.add_argument('--epochs', type=int, default=20, help='training epochs')
+    parser.add_argument('--epochs', type=int, default=22, help='training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='batch size; modify this to fit your GPU memory')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
 
@@ -220,7 +251,8 @@ def get_args():
 
 def start():
     
-    for i in range(100):
+    
+    for i in range(50):
         #wandb.init()
         seed  = random.randint(0,999999999)
         set_seed(seed)
@@ -234,6 +266,7 @@ def start():
             batch_size=args.batch_size,
             epochs=args.epochs,
             learning_rate= 0.001,
+            eval_freq=5
         )
 
 if __name__ == '__main__':

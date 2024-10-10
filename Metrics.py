@@ -82,7 +82,7 @@ class RunningVOG:
             # Normalize using (VOG - mean) / std
             normalized_VOG[i] = (VOG[i] - mean) / sd if sd > 0 else 0  # Avoid division by zero
 
-        return normalized_VOG
+        return VOG
     
     def get_slice_VOGs(self, slice_idxs):
         all_vogs = self.get_VOGs()
