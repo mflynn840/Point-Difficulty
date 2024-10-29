@@ -1,24 +1,23 @@
 import argparse
-import wandb
-from utils import set_seed
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import WandbLogger
-from math import sqrt
-import torch.functional as F 
-from utils import SimpleNN, AdultDataset, CustomModelCheckpoint, get_slice_idx_list
-from Metrics import RunningVOG
 from sklearn.preprocessing import OneHotEncoder
 import random
-from sklearn.metrics import roc_auc_score, accuracy_score
+
+
+from Metrics import RunningVOG, slice_accuracy, slice_loss, slice_auc_roc, slice_EL2N, slice_GRAND, convert_to_slice_score
+from utils import SimpleNN, AdultDataset, set_seed, CustomModelCheckpoint, get_slice_idx_list, get_VOG_grads
 #if you have tensor cores
 torch.set_float32_matmul_precision('medium')
 
+
+#ALWAYS import numpy last or else we cant use multithread pytorch
 import numpy as np
+
+
 class PointDifficultyModule(pl.LightningModule):
     def __init__(self, lr, model, total_steps, trainset, metrics, eval_freq = 1):
         super(PointDifficultyModule, self).__init__()
@@ -49,139 +48,34 @@ class PointDifficultyModule(pl.LightningModule):
         self.log("seen examples", self.seen_examples, on_step=True)
         self.scheduler.step()
         return loss
-    
-    '''get gradients vog needs to compute VOG for each datapoint'''
-    def get_VOG_grads(self):
-        self.model.zero_grad()
-        X = self.trainset.X.to(self.device)
-        Y = self.trainset.Y.to(self.device)
-        X.requires_grad_(True)
-        logits = self.model(X)
-        logits = logits[:, Y]
-        logits.backward(torch.ones_like(logits))
-        input_grad = X.grad
-        S = input_grad.detach().cpu()
-        return S
-
-    def get_EL2N(self):
-        X = self.trainset.X.to(self.device)
-        Y = self.trainset.Y.to(self.device)
-        logits = self.model(X)
-        probabilities = torch.nn.functional.softmax(logits, dim=1)
-        Y_one_hot = torch.nn.functional.one_hot(Y, num_classes=logits.size(1)).float()
-        score = torch.norm(probabilities - Y_one_hot, p=2, dim=1)
-        return score.detach().cpu()
-    
-    def get_GRAND(self):
-        self.model.zero_grad()
-        X = self.trainset.X.to(self.device)
-        Y = self.trainset.Y.to(self.device)
-        
-        no_reduction_loss = nn.CrossEntropyLoss(reduction='none')
-        
-        output_layer = self.model.model[-1]
-        output_layer_name = list(self.model.named_modules())[-1][0]
-        
-        
-        for name, param in self.model.named_parameters():
-            if output_layer_name in name and "weight" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-                
-                
-        
-        logits = self.model(X)
-        loss = no_reduction_loss(logits, Y)
-        
-        scores = torch.zeros((X.shape[0]))
-        
-        for i in range(X.shape[0]):
-            loss[i].backward(retain_graph=True)
-            cur_grad = output_layer.weight.grad.detach()
-            scores[i] = torch.norm(cur_grad[Y[i]], p=2)
-            self.model.zero_grad()
-            
-        for name, param in self.model.named_parameters():
-            param.requires_grad = True
-                
-            
-        return scores.cpu()
-    
-    def get_loss(self):
-        X = self.trainset.X.to(self.device)
-        Y = self.trainset.Y.to(self.device)
-        logits = self.model(X)
-        criterion = nn.CrossEntropyLoss(reduction='none')
-        return criterion(logits, Y).detach().cpu()
-    
-    def slice_auc_roc(self):
-        y_true = self.trainset.Y.numpy()
-        y_pred = torch.softmax(self.model(self.trainset.X.to(self.device)), dim=1)[:,1].detach().cpu().numpy()
-        
-        slice_idxs = get_slice_idx_list()
-        
-        scores = torch.zeros((len(slice_idxs)))
-        
-        for i, slice_idx in enumerate(slice_idxs):
-            if len(np.unique(y_true[slice_idx])) > 1:
-                scores[i] = roc_auc_score(y_true[slice_idx], y_pred[slice_idx])
-            else:
-                print("could not AUC compute for slice " + str(i) + "because it only has 1 class in it")
-        return scores
-    
-    def slice_accuracy(self):
-        y_true = self.trainset.Y.numpy()
-        y_pred = torch.argmax(self.model(self.trainset.X.to(self.device)), dim=1).detach().cpu().numpy()
-        
-        
-        slice_idxs = get_slice_idx_list()
-        scores = torch.zeros((len(slice_idxs)))
-        for i, slice_idx in enumerate(slice_idxs):
-            scores[i] = accuracy_score(y_true[slice_idx], y_pred[slice_idx])
-    
-        return scores
-    
-    def convert_to_slice_score(self, point_scores):
-        slice_idxs = get_slice_idx_list()
-        scores = torch.zeros((len(slice_idxs)))
-        
-        for i, slice_idx in enumerate(slice_idxs):
-            scores[i] = torch.mean(point_scores[slice_idx])
-        return scores
 
     def on_train_epoch_end(self):
+        
+        #collect all the metrics for each slice
         if self.current_epoch == 0:
             self.VOG = RunningVOG((len(self.trainset.X), 128))
         
-        self.VOG.update(self.get_VOG_grads())
+        self.VOG.update(get_VOG_grads(self.model, self.device, self.trainset))
         
-        
-        if self.current_epoch % self.eval_freq == 0 and self.current_epoch > 0:
+        slices = get_slice_idx_list()
+        if self.current_epoch % self.eval_freq == 0:
             metrics = {
-                "GRAND" : self.convert_to_slice_score(self.get_GRAND()),
-                "EL2N" : self.convert_to_slice_score(self.get_EL2N()),
-                "PCA1" : None,
-                "loss" : self.convert_to_slice_score(self.get_loss()),
-                "VOG" : self.convert_to_slice_score(self.VOG.get_VOGs(self.trainset.Y)),
-                "AUC-ROC" : self.slice_auc_roc(),
-                "accuracy" : self.slice_accuracy()
-            }
-            self.train_metrics[self.current_epoch] = metrics
-        elif self.current_epoch % self.eval_freq == 0:
-            metrics = {
-                "GRAND" : self.convert_to_slice_score(self.get_GRAND()),
-                "EL2N" : self.convert_to_slice_score(self.get_EL2N()),
-                "PCA1" : None,
-                "loss" : self.convert_to_slice_score(self.get_loss()),
+                "GRAND" : slice_GRAND(self.model, self.device, self.trainset, slices),
+                "EL2N" : slice_EL2N(self.model, self.device, self.trainset, slices),
+                "loss" : slice_loss(self.model, self.device, self.trainset, slices),
                 "VOG" : None,
-                "AUC-ROC" : self.slice_auc_roc(),
-                "accuracy" : self.slice_accuracy()
+                "AUC-ROC" : slice_auc_roc(self.model, self.device, self.trainset, slices),
+                "accuracy" : slice_accuracy(self.model, self.device, self.trainset, slices)
             }
+            self.train_metrics[self.current_epoch] = metrics
             
+            
+        if self.current_epoch % self.eval_freq == 0 and self.current_epoch > 0:
+            metrics["VOG"] = convert_to_slice_score(self.VOG.get_VOGs(self.trainset.Y), slices)
+
+        if self.current_epoch % self.eval_freq == 0:
             self.train_metrics[self.current_epoch] = metrics
         
-
 
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
@@ -193,7 +87,6 @@ class PointDifficultyModule(pl.LightningModule):
         
         self.scheduler = scheduler
         return optimizer
-
 
 
 def train_model(run_name, model, batch_size, epochs, learning_rate, eval_freq=1):
@@ -228,8 +121,6 @@ def train_model(run_name, model, batch_size, epochs, learning_rate, eval_freq=1)
     #trainer.test(module, test_loader)
 
 
-        
-
 
 def get_args():
     parser = argparse.ArgumentParser(description='Difficulty Measures Trainer')
@@ -245,7 +136,6 @@ def get_args():
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
 
     return parser.parse_args()
-
 
 
 

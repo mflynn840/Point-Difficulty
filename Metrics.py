@@ -1,34 +1,8 @@
-from abc import ABC, abstractmethod
+
 import torch
 import numpy as np
+from sklearn.metrics import roc_auc_score, accuracy_score
 
-class PointDifficultyMetric(ABC):
-    
-    def __init__(self):
-        pass
-    
-    @abstractmethod
-    def scorePoint(point, *kwargs):
-        pass
-    
-    
-    
-class SliceDifficultyMetric(ABC):
-    def __init__(self, slice_idxs, sc_function):
-        
-        #slice_idx[i][j] the ith slices jth datapoints index
-        self.slice_idx = slice_idxs
-        self.point_score = sc_function
-    
-    def score(self):
-        return torch.mean()
-
-
-    def score_slice():
-        x=1
-        
-        
-        
 class RunningVOG:
 
     def __init__(self, shape):
@@ -94,23 +68,125 @@ class RunningVOG:
         return torch.stack(slice_VOGS)
 
 
+'''given a list of scores for each datapoint, compute the scores for each slice as the average'''
+def convert_to_slice_score(point_scores, slices):
 
-class SliceLoss:
+    scores = torch.zeros((len(slices)))
     
-    def __init__(self):
-        x=1
-        
+    for i, slice_idx in enumerate(slices):
+        scores[i] = torch.mean(point_scores[slice_idx])
+    return scores
+
+
+'''
+Compute EL2N scores for each datapoint
+
+EL2N(xi, yi) = || model(xi) - yi ||_2
+
+where yi is a one hot encoding of xi's ground truth
+'''
+def point_EL2N(model, device, dataset):
+    X = dataset.X.to(device)
+    Y = dataset.Y.to(device)
+    logits = model(X)
+    probabilities = torch.nn.functional.softmax(logits, dim=1)
+    Y_one_hot = torch.nn.functional.one_hot(Y, num_classes=logits.size(1)).float()
+    score = torch.norm(probabilities - Y_one_hot, p=2, dim=1)
+    return score.detach().cpu()
+
+
+
+def slice_EL2N(model, device, dataset, slices):
+    point_scores = point_EL2N(model, device, dataset)
+    return convert_to_slice_score(point_scores, slices)
+
+'''
+Compute GRAND scores for each datapoint
+'''
+def point_GRAND(model, device, dataset):
+    model.zero_grad()
+    X = dataset.X.to(device)
+    Y = dataset.Y.to(device)
+    
+    
+    no_reduction_loss = torch.nn.CrossEntropyLoss(reduction='none')
+
+    output_layer = model.model[-1]
+    output_layer_name = list(model.named_modules())[-1][0]
+    
+    
+    #turn off gradients for all layers except the last
+    for name, param in model.named_parameters():
+        if output_layer_name in name and "weight" in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
             
-class EL2N:
-    x=1
-
-class GRAND:
-    x=1
-
-class EL2N:
-    x=1
-
-class PCA1:
-    x=1
+            
     
+    logits = model(X)
+    loss = no_reduction_loss(logits, Y)
+    
+    scores = torch.zeros((X.shape[0]))
+    
+    #run each datapoint through the model and get the gradient of the output layer weights w.r.t the output
+    for i in range(X.shape[0]):
+        loss[i].backward(retain_graph=True)
+        cur_grad = output_layer.weight.grad.detach()
+        scores[i] = torch.norm(cur_grad[Y[i]], p=2)
+        model.zero_grad()
+        
+    for name, param in model.named_parameters():
+        param.requires_grad = True
+            
+    return scores.cpu()
+
+def slice_GRAND(model, device, dataset, slices):
+    point_scores = point_GRAND(model, device, dataset)
+    return convert_to_slice_score(point_scores, slices)
+    
+    
+'''compute the loss for each datapoint in the dataset'''
+def point_loss(model, device, dataset):
+    X = dataset.X.to(device)
+    Y = dataset.Y.to(device)
+    logits = model(X)
+    criterion = torch.nn.CrossEntropyLoss(reduction='none')
+    return criterion(logits, Y).detach().cpu()
+
+
+def slice_loss(model, device, dataset, slices):
+    point_scores = point_loss(model, device, dataset)
+    return convert_to_slice_score(point_scores, slices)
+
+
+'''since auc-roc is not defined per-point compute the scores for each slice.  if the score cannot be computed then score it as 0'''
+def slice_auc_roc(model, device, dataset, slices):
+    y_true = dataset.Y.numpy()
+    y_pred = torch.softmax(model(dataset.X.to(device)), dim=1)[:,1].detach().cpu().numpy()
+
+
+    scores = torch.zeros((len(slices)))
+    for i, slice_idx in enumerate(slices):
+        if len(np.unique(y_true[slice_idx])) > 1:
+            scores[i] = roc_auc_score(y_true[slice_idx], y_pred[slice_idx])
+        else:
+            print("could not AUC compute for slice " + str(i) + "because it only has 1 class in it")
+    return scores
+
+'''since accuracy is not defined per point, compute it per slice'''
+def slice_accuracy(model, device, dataset, slices):
+    y_true = dataset.Y.numpy()
+    y_pred = torch.argmax(model(dataset.X.to(device)), dim=1).detach().cpu().numpy()
+    
+
+    scores = torch.zeros((len(slices)))
+    for i, slice_idx in enumerate(slices):
+        scores[i] = accuracy_score(y_true[slice_idx], y_pred[slice_idx])
+
+    return scores
+
+
+
+
 

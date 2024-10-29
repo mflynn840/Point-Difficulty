@@ -1,15 +1,32 @@
-import numpy as np
-import random
 import torch
-from torch import nn
+import torch.nn as nn
 from torch.utils.data import Dataset
-import pickle as pkl
-import torch.functional as F
 from pytorch_lightning.callbacks import ModelCheckpoint
+import random
+import pickle as pkl
 import os
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
+
+
+
+def get_slice_idx_list(path="./slice.idx"):
+    with open(path, 'rb') as file:
+        return pkl.load(file)
+        
+        
+
+'''get gradients vog needs to compute VOG for each datapoint'''
+def get_VOG_grads(model, device, dataset):
+    model.zero_grad()
+    X = dataset.X.to(device)
+    Y = dataset.Y.to(device)
+    X.requires_grad_(True)
+    logits = model(X)
+    logits = logits[:, Y]
+    logits.backward(torch.ones_like(logits))
+    input_grad = X.grad
+    S = input_grad.detach().cpu()
+    return S
 
 def init_weights(layer):
     if isinstance(layer, nn.Linear):
@@ -129,50 +146,4 @@ class CustomModelCheckpoint(ModelCheckpoint):
         with open(metrics_path, 'wb') as f:
             pkl.dump(self.metrics_dict, f)
             
-            
-class QuickPlot:
-    def __init__(self, Xs, Ys, labels, xlab="x", ylab="y", title="Title", markLast=False, percent=False):
-
-        if type(Xs) is list:
-            for X, Y, label in zip(Xs, Ys, labels):
-                plt.plot(X, Y, label=label, linestyle='-')
-                
-                if markLast:
-                    if percent:
-                        plt.text( X[-1],Y[-1], f'Final = {Y[-1]*100:.2f} %', fontsize=14, ha='right', va='bottom')
-                    else:
-                        plt.text( X[-1],Y[-1], f'Final = {Y[-1]:.3f} ', fontsize=14, ha='right', va='bottom')
-        else:
-            plt.plot(X, Y)
-
-        plt.xlabel(xlab)
-        plt.ylabel(ylab)
-        plt.title(title)
-
-
-        # Add a legend, grid, and show the plot
-        plt.legend(markerscale=1.5)
-        plt.grid(True)
-        plt.show()
-       
-def correlation_matrix(scores, score_names, epoch):
-    # Create a DataFrame from the scores array
-    df = pd.DataFrame(scores, columns=score_names)
-
-    # Calculate the correlation matrix between scoring functions
-    correlation_matrix = df.corr()
-
-    # Display the correlation matrix
-    print("Correlation Matrix:\n", correlation_matrix)
-
-    # Optional: Visualize the correlation matrix using seaborn
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt=".2f")
-    plt.title('Correlation Matrix of Scoring Functions epoch' + str(epoch))
-    plt.show()
-    
-def get_slice_idx_list(path="./slice.idx"):
-    with open(path, 'rb') as file:
-        return pkl.load(file)
-        
-
+           
