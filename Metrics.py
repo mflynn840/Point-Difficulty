@@ -171,7 +171,7 @@ def slice_auc_roc(model, device, dataset, slices):
         if len(np.unique(y_true[slice_idx])) > 1:
             scores[i] = roc_auc_score(y_true[slice_idx], y_pred[slice_idx])
         else:
-            print("could not AUC compute for slice " + str(i) + "because it only has 1 class in it")
+            print("could not AUC compute for slice " + str(i) + " because it only has 1 class in it")
     return scores
 
 '''since accuracy is not defined per point, compute it per slice'''

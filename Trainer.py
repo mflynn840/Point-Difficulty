@@ -9,7 +9,7 @@ import random
 
 
 from Metrics import RunningVOG, slice_accuracy, slice_loss, slice_auc_roc, slice_EL2N, slice_GRAND, convert_to_slice_score
-from utils import SimpleNN, AdultDataset, set_seed, CustomModelCheckpoint, get_slice_idx_list, get_VOG_grads
+from ML_utils import SimpleNN, AdultDataset, set_seed, CustomModelCheckpoint, get_slice_idx_list, get_VOG_grads
 #if you have tensor cores
 torch.set_float32_matmul_precision('medium')
 

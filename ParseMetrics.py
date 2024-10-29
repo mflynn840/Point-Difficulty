@@ -3,8 +3,21 @@ import torch
 import numpy as np
 from sklearn.decomposition import PCA
 import os
+import pandas as pd
 
 
+def rank_normalize(scores_mat):
+    df = pd.DataFrame(scores_mat)
+    ranked_df = df.rank(method='average', axis=0)
+    return ranked_df.to_numpy()
+
+
+def quantile_normalize(scores_mat):
+    df = pd.DataFrame(scores_mat)
+    ranked = df.rank(method='average', axis=0)
+    mean_values = df.stack().groupby(ranked.stack()).mean()
+    normalized_df = ranked.stack().map(mean_values).unstack()
+    return normalized_df.to_numpy()
 
 
 def get_metrics(path="./checkpoints/34298864.metrics"):
@@ -12,9 +25,13 @@ def get_metrics(path="./checkpoints/34298864.metrics"):
         return pkl.load(file)
 
 
-def parse_metrics(epoch, random_slices):
+'''
+Returns a matrix A where
+A[i][j] is slice i's score under scoring function j (averaged over weight initilizations and normalized)
+'''
+def get_avg_scores(epoch, normalization = "quantile"):
 
-    bar_names = ["loss", "accuracy", "AUC-ROC", "GRAND", "EL2N", "PCA1"]
+    metric_names = ["loss", "accuracy", "AUC-ROC", "GRAND", "EL2N", "VOG"]
 
     #need to flip scores that run in different directions
     lower_is_better = {
@@ -27,90 +44,58 @@ def parse_metrics(epoch, random_slices):
     }
     
 
-    #agregate metrics from the various runs
+
+    #all_metrics[i][j][k][l] is run i, epoch j, scoring function k and slice l's score
     all_metrics = {}
-    i=0
-    for metname in os.listdir("./checkpoints"):
-        if ".metrics" in metname:
-            fname = os.path.join("./checkpoints", metname)
+    
+    for r_name in os.listdir("./checkpoints"):
+        if ".metrics" in r_name:
+            fname = os.path.join("./checkpoints", r_name)
             with open(fname, 'rb') as file:
-                all_metrics[i] = pkl.load(file)
-                i += 1
+                all_metrics[r_name] = pkl.load(file)
     
-    
-    #get the mean of each metric      
+    #get the mean of each metric over runs on the desired epoch   
     avg_scores = {} 
     
     #for each metric
-    for metric_idx, metric in enumerate(bar_names):
+    for metric in metric_names:
         
         #compute the average score of each slice for that metric
         avg = torch.zeros(128)
-        count = 0
-        for run in range(i):
-            if (metric == "VOG" or metric == "PCA1"):
-                continue
-            if run != 2:
-                print(run)
-                scores = all_metrics[run][epoch][metric]
-                avg += scores
-                count += 1
+        n_runs = 0
+        
+        for run in all_metrics.keys():
+            scores = all_metrics[run][epoch][metric]
+            avg += scores
+            n_runs += 1
             
-        if not(metric == "VOG" or metric == "PCA1") and run != 2:
-            avg /= count
-            avg_scores[metric] = avg
+        avg /= n_runs
+        avg_scores[metric] = avg
 
-    scores = np.zeros((128, 6))
 
-    for j, (metric) in enumerate(bar_names):
-        if j == 5:
-            break
-        scores[:, j] = avg_scores[metric].numpy()
+    #scores_mat[i][j] is slice i's score under scoring function j
+    scores_mat = np.zeros((128, 6))
+
+    #get matrix representation
+    for j, (metric) in enumerate(metric_names):
+        scores_mat[:, j] = avg_scores[metric].numpy()
         
         if lower_is_better.get(metric, True):
-            scores[:, j] = -scores[:, j]
+            scores_mat[:, j] = -1 * scores_mat[:, j]
 
-
-    for i in range()
-    scores
-    # Apply PCA
-    pca = PCA(n_components=1)  # Reduce to 2 dimensions
-    principal_components = pca.fit_transform(scores[:])
-    #Normalize the scores with (Min-max normalization)
-    
-    
-    for i in range(128):
-        scores[i][5] = principal_components[i]
-
-
-    vars = {}
-    
-    for metric_idx, metric in enumerate(bar_names):
-        if metric != "PCA1":
-            var = torch.zeros(128)
-            for run in range(8):
-                if epoch in all_metrics[run].keys():
-                    var += (all_metrics[run][epoch][metric] - avg_scores[metric])**2
-            
-            var = (1/8) * var
-            vars[metric] = var
+    print(scores_mat.shape)
+    #normalize all scores
+    if normalization == "quantile":
+        return quantile_normalize(scores_mat)
         
-    var_plot(vars,  ["loss", "accuracy", "AUC-ROC", "GRAND", "EL2N"], 128, epoch)
-
+    if normalization == "rank":
+        return rank_normalize(scores_mat)
     
-    ranks = np.argsort(np.argsort(-scores, axis=0), axis=0) + 1  # +1 to start ranks at 1
-    correlation_matrix(ranks, bar_names, epoch)
-    
-    
-    bar_chart(ranks[random_slices, :], bar_names, epoch, random_slices)
-    visualize_pca(scores[:,:5])
-
-
-
 
 
 if __name__ == "__main__":
-    random_slices = np.random.randint(0, high=128, size=(7), dtype='l')
-    parse_metrics(20, random_slices)
+    scores_mat = get_avg_scores(epoch=20, normalization="rank")
+    #print(scores_mat.shape)
+    print(np.unique(scores_mat[:, 0]))
 
     
