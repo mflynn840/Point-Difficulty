@@ -5,7 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
-
+from scipy.stats import spearmanr
 
 '''plot multiple lines on a graph'''
 def plot(Xs, Ys, labels, xlab="x", ylab="y", title="Title", markLast=False, percent=False):
@@ -119,3 +119,62 @@ def var_plot(vars, score_names, num_slices, epoch):
         plt.grid(axis='y', linestyle='--', alpha=0.7)
         plt.tight_layout()
         plt.show()
+        
+     
+     
+def spearman_matrix(data, labels, epoch):   
+    # Compute Spearman rank correlation matrix
+    corr_matrix, _ = spearmanr(data, axis=0)
+
+    # Convert to a DataFrame for better readability
+    corr_df = pd.DataFrame(corr_matrix, columns=labels,
+                        index=labels)
+
+    # Plotting the heatmap
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(corr_df, annot=True, fmt=".2f", cmap='coolwarm', square=True,
+                cbar_kws={"shrink": .8}, linewidths=0.5)
+    plt.title('Spearman Correlations (epoch ' + str(epoch) + ')')
+    plt.show()
+
+
+
+def PCA_correlations(principle_components, scores_mat, metric_names, epoch):
+    pc_df = pd.DataFrame(principle_components, columns=[f'PC{i + 1}' for i in range(principle_components.shape[1])])
+    scores_df = pd.DataFrame(scores_mat, columns=metric_names)
+
+    combined_df = pd.concat([scores_df, pc_df], axis=1)
+
+    # Compute the correlation matrix
+    correlation_matrix = combined_df.corr(method="spearman")
+
+    # get correlation between the principal components and the original scoring functions
+    pc_scores_corr = correlation_matrix.loc[metric_names, [f'PC{i + 1}' for i in range(principle_components.shape[1])]]
+
+    print("Correlation Matrix between Principal Components and Scoring Functions:")
+    plt.figure(figsize=(10, 6))
+    sns.heatmap(pc_scores_corr, annot=True, fmt=".2f", cmap='coolwarm', square=True,
+                cbar_kws={"shrink": .8}, linewidths=0.5)
+    plt.title('Spearman Correlation (epoch ' + str(epoch) + ')')
+    plt.xlabel('Principal Components')
+    plt.ylabel('Scoring Functions')
+    plt.show()
+    
+def explained_variance(explained_var, epoch):
+    # Plotting the stacked horizontal bar chart
+    plt.figure(figsize=(10, 6))
+    
+    # Generate distinct colors
+    colors = plt.cm.tab10(np.linspace(0, 1, len(explained_var)))  # Use tab10 for distinct colors
+
+    # Create a horizontal bar for each component
+    bottom = np.zeros(1)  # Initialize bottom for stacking
+    for i, variance in enumerate(explained_var):
+        plt.barh('Variance Explained', variance, left=bottom, color=colors[i], label=f'PC {i + 1}')
+        bottom += variance  # Update left position for the next bar
+
+    plt.title('Variance Explained by Principal Components (epoch ' + str(epoch) + ')')
+    plt.xlabel('Proportion of Variance Explained')
+    plt.legend(title='Principal Components')
+    plt.xlim(0, 1)  # Set x-limit from 0 to 1
+    plt.show()
