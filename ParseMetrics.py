@@ -43,7 +43,7 @@ def get_avg_scores(epoch, normalization = "quantile"):
         "AUC-ROC" : False,
         "GRAND" : True,
         "EL2N" : True,
-        "VOG" : True
+        "VOG" : False
     }
     
 
@@ -57,6 +57,8 @@ def get_avg_scores(epoch, normalization = "quantile"):
             with open(fname, 'rb') as file:
                 all_metrics[r_name] = pkl.load(file)
     
+    
+
     #get the mean of each metric over runs on the desired epoch   
     avg_scores = {} 
     
@@ -118,7 +120,8 @@ def scoring_correlations():
     spearman_matrix(scores_mat_15, metric_names, 15)
     spearman_matrix(scores_mat_20, metric_names, 20)
 
-if __name__ == "__main__":
+
+def PCA_analysis():
     metric_names = ["loss", "accuracy", "AUC-ROC", "GRAND", "EL2N", "VOG"]
     metric_names_0 =  ["loss", "accuracy", "AUC-ROC", "GRAND", "EL2N"]
     
@@ -134,8 +137,109 @@ if __name__ == "__main__":
     principle_components_0 = pca.fit_transform(scores_mat_0)
     explained_varience_0 = pca.explained_variance_ratio_
     
-    #PCA_correlations(principle_components_20, scores_mat_20, metric_names, 20)
-    #PCA_correlations(principle_components_0, scores_mat_0, metric_names_0, 0)
+    PCA_correlations(principle_components_20, scores_mat_20, metric_names, 20)
+    PCA_correlations(principle_components_0, scores_mat_0, metric_names_0, 0)
     explained_variance(explained_variance_20, 20)
     explained_variance(explained_varience_0, 0)
     
+    
+'''how much of the top-k sets of each score function are the same'''
+def scoring_similarity(topk):
+    metric_names = ["loss", "accuracy", "AUC-ROC", "GRAND", "EL2N", "VOG", "PCA-1"]
+
+
+    epochs = [0, 5, 10, 15, 20]
+    epoch_top_ks = []
+    for epoch in epochs:
+        scores_mat = get_avg_scores(epoch=epoch, normalization="quantile")
+        
+        if epoch == 0:
+            scores_mat = np.hstack((scores_mat, np.zeros((scores_mat.shape[0], 1))))
+            
+        pca = PCA(n_components=1)
+        principle_components = pca.fit_transform(scores_mat)
+        scores_mat = np.hstack((scores_mat, principle_components))
+        sorted_idxs = np.argsort(scores_mat, axis=0)
+        epoch_top_ks.append(sorted_idxs[0:topk, :])
+
+    epoch_top_ks = np.stack(epoch_top_ks)
+    match_counts = np.zeros((5, 7, 7))
+    print(epoch_top_ks.shape)
+    
+    for i in range(5):
+        scores = epoch_top_ks[i]
+        for j in range(7):
+            for k in range(j + 1, 7):
+
+
+                matches = np.intersect1d(scores[:, j], scores[:, k]).size
+
+                match_counts[i, j, k] += matches
+                match_counts[i, k, j] += matches 
+    
+    for i in range(7):
+        match_counts[:, i, i] = topk
+        
+    #print(match_counts)
+    match_counts /= topk
+    # Output the match counts
+    print("Match counts between scoring functions:")
+    #print(match_counts)
+    #print(epoch_top_ks.shape)
+    
+    fig, axes = plt.subplots(5, 1, figsize=(8, 4 * 5))
+
+    for i in range(5):
+        ax = axes[i]
+        sns.heatmap(match_counts[i], annot=True, fmt='f', cmap='YlGnBu', ax=ax,
+                    xticklabels=metric_names,
+                    yticklabels=metric_names)
+        ax.set_title(f'Epoch {epochs[i]}')
+        ax.set_xlabel('Scoring Function')
+        ax.set_ylabel('Scoring Function')
+
+    # Adjust layout
+    plt.tight_layout()
+    plt.show()
+    
+'''how much does the same scoring functions ranks change throughout training'''
+def scoring_integrity():
+    
+    metric_names = ["loss", "accuracy", "AUC-ROC", "GRAND", "EL2N", "VOG"]
+    epochs = [0, 5, 10, 15, 20]
+    
+    
+    for metric_name in metric_names:
+        epoch_scores = []
+        metric_idx = metric_names.index(metric_name)
+        for epoch in epochs:
+            scores_mat = get_avg_scores(epoch=epoch, normalization="quantile")
+            
+            if epoch == 0:
+                scores_mat = np.hstack((scores_mat, np.zeros((scores_mat.shape[0], 1))))
+
+            epoch_scores.append(scores_mat[:, metric_idx])
+    
+        epoch_scores = np.asarray(epoch_scores).T
+
+        df_scores = pd.DataFrame(epoch_scores)
+        correlation_matrix = df_scores.corr("spearman").values
+
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', 
+                    xticklabels=[f'Epoch {i+1}' for i in range(5)], 
+                    yticklabels=[f'Epoch {i+1}' for i in range(5)])
+        plt.title('Correlation Between Epochs (' + str(metric_name) + ")")
+        plt.xlabel('Epochs')
+        plt.ylabel('Epochs')
+        plt.show()
+
+        
+    
+if __name__ == "__main__":
+    #scoring_correlations()
+    #scoring_similarity(10)
+    scoring_integrity()
+    
+    
+
